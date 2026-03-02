@@ -90,9 +90,7 @@ def handle_new_registration(event):
 
 # Pasang "Telinga" ke Firebase
 print("[INFO] 🎧 Mendengarkan perintah dari Cloud Dashboard...")
-ref_queue.listen(handle_new_registration)
-
-
+db_listener = ref_queue.listen(handle_new_registration)
 
 # MENGAMBIL DATA DARI LOCAL 'users'
 def load_faces_from_local():
@@ -254,6 +252,8 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
+
+db_listener.close()
 
 if 'arduino' in locals() and arduino is not None and arduino.is_open:
     arduino.close()
