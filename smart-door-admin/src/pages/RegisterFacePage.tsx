@@ -41,31 +41,19 @@ export default function RegisterFacePage() {
     setErrorMessage("");
 
     try {
-      // 1. Konversi gambar Base64 dari Webcam menjadi objek File fisik
-      const res = await fetch(imgSrc);
-      const blob = await res.blob();
       const safeName = name.replace(/\s+/g, '_').toUpperCase();
-      const file = new File([blob], `${safeName}.jpg`, { type: "image/jpeg" });
 
-      // 2. Siapkan FormData untuk API Python
-      const formData = new FormData();
-      formData.append('nama', safeName);
-      formData.append('foto', file);
-
-      // 3. Kirim ke Python Backend Lokal (Port 5000)
-      const pythonResponse = await fetch('http://localhost:5000/api/register', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const pythonResult = await pythonResponse.json();
-
-      if (!pythonResponse.ok) {
-        throw new Error(pythonResult.message || "Gagal mendaftarkan ke sistem AI");
-      }
-
-      // 4. (Opsional) Tetap simpan metadata ke Firebase RTDB untuk keperluan tabel Dashboard
       if (rtdb) {
+        // 1. Masukkan ke Antrean Registrasi (Untuk dibaca Python)
+        const queueRef = dbRef(rtdb, "registration_queue");
+        const newQueueRef = push(queueRef);
+        await set(newQueueRef, {
+          name: safeName,
+          image_base64: imgSrc, // Langsung kirim teks Base64 dari webcam!
+          timestamp: new Date().toISOString()
+        });
+
+        // 2. Masukkan ke Daftar User (Untuk tabel Dashboard web Anda)
         const usersRef = dbRef(rtdb, "users");
         const newUserRef = push(usersRef);
         await set(newUserRef, {
@@ -83,7 +71,7 @@ export default function RegisterFacePage() {
     } catch (error: any) {
       console.error("Error registering face:", error);
       setStatus("error");
-      setErrorMessage(error.message || "Terjadi kesalahan jaringan.");
+      setErrorMessage(error.message || "Terjadi kesalahan saat mengirim ke Firebase.");
     } finally {
       setLoading(false);
     }

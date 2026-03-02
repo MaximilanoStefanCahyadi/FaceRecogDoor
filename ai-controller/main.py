@@ -7,61 +7,7 @@ import os
 import base64  # <-- Tambahan baru untuk Strategi 2
 from firebase_config import initialize_firebase
 import serial
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import threading
-import werkzeug
-
-# --- SETUP FLASK API ---
-app = Flask(__name__)
-CORS(app) # Mengizinkan akses dari Frontend (React)
-
-@app.route('/api/register', methods=['POST'])
-def register_new_face():
-    try:
-        # Cek apakah ada file foto dan nama yang dikirim dari Web
-        if 'foto' not in request.files or 'nama' not in request.form:
-            return jsonify({"status": "error", "message": "Data tidak lengkap"}), 400
-            
-        foto_file = request.files['foto']
-        nama_user = request.form['nama'].upper()
-        
-        # Bersihkan nama file agar aman (Budi -> BUDI.jpg)
-        nama_file_aman = werkzeug.utils.secure_filename(f"{nama_user}.jpg")
-        path_simpan = os.path.join('users', nama_file_aman)
-        
-        # Simpan foto ke folder lokal 'users/'
-        foto_file.save(path_simpan)
-        print(f"\n[API] Menerima pendaftaran baru: {nama_user}")
-        
-        # --- UPDATE MEMORI AI SECARA LANGSUNG ---
-        # Baca ulang wajah spesifik yang baru saja masuk
-        img = face_recognition.load_image_file(path_simpan)
-        encodings = face_recognition.face_encodings(img)
-        
-        if len(encodings) > 0:
-            known_face_encodings.append(encodings[0])
-            known_face_names.append(nama_user)
-            print(f"[SUCCESS] Wajah {nama_user} ditambahkan ke memori AI!")
-            return jsonify({"status": "success", "message": f"{nama_user} berhasil didaftarkan"}), 200
-        else:
-            # Jika foto blur atau tidak ada wajah, hapus filenya
-            os.remove(path_simpan)
-            return jsonify({"status": "error", "message": "Wajah tidak terdeteksi di foto ini"}), 400
-            
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-def run_api_server():
-    # Menjalankan Flask di port 5000
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
-
-# --- MULAI THREAD FLASK SEBELUM MEMBUKA KAMERA ---
-print("[INFO] Memulai API Server di http://localhost:5000...")
-api_thread = threading.Thread(target=run_api_server, daemon=True)
-api_thread.start()
-
-# ... (KODE OpenCV while True LOOP KAMERA ANDA DI BAWAH SINI TETAP SAMA) ...
+import urllib.request
 
 # --- KONFIGURASI ARDUINO ---
 # GANTI 'COM3' DENGAN PORT ARDUINO MEGA ANDA (Lihat di Arduino IDE)
@@ -85,19 +31,75 @@ TOLERANCE = 0.4
 # 1. Inisialisasi Firebase
 db_conn = initialize_firebase()
 ref_logs = db_conn.reference('logs')
+ref_queue = db_conn.reference('registration_queue')
 
 known_face_encodings = []
 known_face_names = []
 
+# --- FUNGSI BANTUAN UNTUK LISTENER ---
+def proses_data_wajah(key, val):
+    if isinstance(val, dict) and 'name' in val and 'image_base64' in val:
+        nama_user = val['name']
+        base64_str = val['image_base64']
+        
+        print(f"\n[CLOUD] ☁️ Menerima pendaftaran wajah baru: {nama_user}")
+        
+        if "," in base64_str:
+            base64_str = base64_str.split(",")[1]
+        
+        path_simpan = os.path.join('users', f"{nama_user}.jpg")
+        try:
+            with open(path_simpan, "wb") as fh:
+                fh.write(base64.b64decode(base64_str))
+            
+            img = face_recognition.load_image_file(path_simpan)
+            encodings = face_recognition.face_encodings(img)
+            if len(encodings) > 0:
+                known_face_encodings.append(encodings[0])
+                known_face_names.append(nama_user)
+                print(f"[SUCCESS] ✅ Wajah {nama_user} siap digunakan!")
+            else:
+                print(f"[WARNING] ⚠️ Wajah tidak terdeteksi pada foto {nama_user}")
+                os.remove(path_simpan)
+                
+            # Hapus antrean berdasarkan Key/ID yang tepat
+            ref_queue.child(key).delete()
+            print("[CLOUD] 🧹 Antrean dibersihkan.")
+            
+        except Exception as e:
+            print(f"[ERROR] Gagal memproses gambar dari cloud: {e}")
+
+# KONFIGURASI ANTRIAN UNTUK MENDAPATKAN DATA SEMENTARA DARI DATABASE YANG LEWAT SEMENTARA SAJA
+# INI NANTI KALAU UDAH JADI BISA DIGANTI
+# AKAN LANGSUNG MENGHAPUS DATA DARI DATABASE 'users'
+def handle_new_registration(event):
+    if event.data is None:
+        return
+        
+    # Skenario A: Initial Load (Membaca sisa antrean lama)
+    if event.path == '/':
+        if isinstance(event.data, dict):
+            for key, val in event.data.items():
+                proses_data_wajah(key, val)
+    
+    # Skenario B: Real-time Update (Ada 1 data baru masuk saat program jalan)
+    else:
+        key = event.path.replace('/', '') # Mengambil ID antrean
+        val = event.data
+        proses_data_wajah(key, val)
+
+# Pasang "Telinga" ke Firebase
+print("[INFO] 🎧 Mendengarkan perintah dari Cloud Dashboard...")
+ref_queue.listen(handle_new_registration)
+
+
+
+# MENGAMBIL DATA DARI LOCAL 'users'
 def load_faces_from_local():
     print("[INFO] Membaca data wajah dari folder lokal 'users/'...")
-    folder_path = 'users'
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
-        return
-    for filename in os.listdir(folder_path):
+    for filename in os.listdir('users'):
         if filename.endswith('.jpg') or filename.endswith('.png'):
-            path_to_file = os.path.join(folder_path, filename)
+            path_to_file = os.path.join('users', filename)
             img = face_recognition.load_image_file(path_to_file)
             encodings = face_recognition.face_encodings(img)
             if len(encodings) > 0:
@@ -143,7 +145,7 @@ def get_base64_face(img, y1, x2, y2, x1):
     except Exception as e:
         print(f"[WARNING] Gagal crop wajah: {e}")
         return ""
-
+    
 while True:
     success, img = cap.read()
     if not success:
