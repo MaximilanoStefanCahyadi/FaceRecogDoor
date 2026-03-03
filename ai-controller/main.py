@@ -123,13 +123,6 @@ def handle_door_commands(event):
         val = event.data
         proses_buka_pintu(key, val)
 
-# Pasang "Telinga" ke Firebase
-print("[INFO] 🎧 Mendengarkan perintah dari Cloud Dashboard...")
-db_listener = ref_queue.listen(handle_new_registration)
-
-print("[INFO] 🎧 Mendengarkan perintah remote control pintu...")
-db_listener_commands = ref_commands.listen(handle_door_commands)
-
 # MENGAMBIL DATA DARI LOCAL 'users'
 def load_faces_from_local():
     print("[INFO] Membaca data wajah dari folder lokal 'users/'...")
@@ -148,6 +141,13 @@ load_faces_from_local()
 
 cap = cv2.VideoCapture(0)
 print("[INFO] Kamera Aktif. Menunggu wajah...")
+
+# Pasang "Telinga" ke Firebase
+print("[INFO] 🎧 Mendengarkan perintah dari Cloud Dashboard...")
+db_listener = ref_queue.listen(handle_new_registration)
+
+print("[INFO] 🎧 Mendengarkan perintah remote control pintu...")
+db_listener_commands = ref_commands.listen(handle_door_commands)
 
 cooldown = False
 cooldown_time = 0
@@ -186,8 +186,11 @@ while True:
     success, img = cap.read()
     if not success:
         break
+    
+    # Mengkompres ukuran kamera supaya tidak berat
+    small_frame = cv2.resize(img, (0,0), fx = 0.25, fy=0.25)
 
-    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    rgb_img = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
     rgb_img_strict = np.ascontiguousarray(rgb_img[:, :, :3], dtype=np.uint8)
 
     facesCurFrame = face_recognition.face_locations(rgb_img_strict)
@@ -198,6 +201,9 @@ while True:
         matches = face_recognition.compare_faces(known_face_encodings, encodeFace, tolerance=TOLERANCE)
         faceDis = face_recognition.face_distance(known_face_encodings, encodeFace)
         y1, x2, y2, x1 = faceLoc
+
+        # Karena ukuran kamera dikurangi 1/4 maka koordinat harus dikali 4
+        y1, x2, y2, x1 = y1 * 4, x2 * 4, y2 * 4, x1 * 4
 
         if len(faceDis) > 0:
             matchIndex = np.argmin(faceDis)
@@ -300,7 +306,7 @@ if 'arduino' in locals() and arduino is not None and arduino.is_open:
 if 'db_listener' in locals() :
     db_listener.close()
 
-if 'db_listener_command' in locals() :
+if 'db_listener_commands' in locals() :
     db_listener_commands.close()
 
 # 2. Hapus seluruh sesi Firebase dari memori aplikasi
