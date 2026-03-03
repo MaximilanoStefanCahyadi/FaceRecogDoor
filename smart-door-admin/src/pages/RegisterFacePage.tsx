@@ -3,7 +3,7 @@ import Webcam from "react-webcam";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Camera, RefreshCw, Save, UserPlus } from "lucide-react";
+import { Camera, RefreshCw, Save, UserPlus, Upload } from "lucide-react";
 
 // HAPUS import firebase/storage karena kita pakai Local Storage Python
 import { ref as dbRef, push, set } from "firebase/database";
@@ -12,6 +12,7 @@ import { useAuth } from "@/contexts/AuthContext";
 
 export default function RegisterFacePage() {
   const webcamRef = useRef<Webcam>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [imgSrc, setImgSrc] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
@@ -26,10 +27,28 @@ export default function RegisterFacePage() {
     }
   }, [webcamRef]);
 
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImgSrc(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const triggerFileUpload = () => {
+    fileInputRef.current?.click();
+  };
+
   const retake = () => {
     setImgSrc(null);
     setStatus("idle");
     setErrorMessage("");
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
   };
 
   const handleRegister = async (e: React.FormEvent) => {
@@ -105,6 +124,11 @@ export default function RegisterFacePage() {
                   className="h-full w-full object-cover"
                   mirrored={true} // Biasanya webcam laptop lebih natural jika di-mirror
                   screenshotQuality={1}
+                  disablePictureInPicture={false}
+                  forceScreenshotSourceSize={false}
+                  imageSmoothing={true}
+                  onUserMedia={() => {}}
+                  onUserMediaError={() => {}}
                 />
               )}
             </div>
@@ -116,10 +140,23 @@ export default function RegisterFacePage() {
                   Retake
                 </Button>
               ) : (
-                <Button className="w-full" onClick={capture}>
-                  <Camera className="mr-2 h-4 w-4" />
-                  Capture
-                </Button>
+                <div className="flex w-full gap-2">
+                  <Button className="flex-1" onClick={capture}>
+                    <Camera className="mr-2 h-4 w-4" />
+                    Capture
+                  </Button>
+                  <Button variant="secondary" className="flex-1" onClick={triggerFileUpload}>
+                    <Upload className="mr-2 h-4 w-4" />
+                    Upload
+                  </Button>
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    className="hidden"
+                    accept="image/*"
+                    onChange={handleFileUpload}
+                  />
+                </div>
               )}
             </div>
           </CardContent>
