@@ -7,7 +7,6 @@ import os
 import base64  # <-- Tambahan baru untuk Strategi 2
 from firebase_config import initialize_firebase
 import serial
-import urllib.request
 
 # --- KONFIGURASI ARDUINO ---
 # GANTI 'COM3' DENGAN PORT ARDUINO MEGA ANDA (Lihat di Arduino IDE)
@@ -30,8 +29,9 @@ TOLERANCE = 0.4
 
 # 1. Inisialisasi Firebase
 db_conn = initialize_firebase()
-ref_logs = db_conn.reference('logs')
-ref_queue = db_conn.reference('registration_queue')
+ref_logs = db_conn.reference('logs') # untuk logs
+ref_queue = db_conn.reference('registration_queue') # untuk mendapat wajah baru
+ref_commands = db_conn.reference('door_commands') # untuk membuka pintu melalui web
 
 known_face_encodings = []
 known_face_names = []
@@ -88,9 +88,47 @@ def handle_new_registration(event):
         val = event.data
         proses_data_wajah(key, val)
 
+
+# MENANGANI INFORMASI BARU DARI DATABASE BERUPA OPEN ATAU CLOSE
+def handle_door_commands(event):
+    if event.data is None:
+        return
+
+    def proses_buka_pintu(key, val):
+        if isinstance(val, dict) and val.get('command') == 'OPEN':
+            admin_email = val.get('requestedBy', 'Admin')
+            print(f"\n[CLOUD] 🔓 Perintah BUKA PINTU jarak jauh diterima dari: {admin_email}")
+            
+            # Kirim sinyal ke hardware
+            if arduino is not None:
+                try:
+                    arduino.write(b'O')
+                    print("[HARDWARE] Sinyal 'O' dikirim ke motor Servo via Remote.")
+                except Exception as e:
+                    print(f"[ERROR HARDWARE] Gagal mengirim sinyal ke Arduino: {e}")
+            else:
+                print("[WARNING] Arduino tidak terhubung. Simulasi pintu terbuka.")
+            
+            # Hapus perintah dari database agar tidak dieksekusi ulang
+            ref_commands.child(key).delete()
+
+    # Skenario A: Initial Load
+    if event.path == '/':
+        if isinstance(event.data, dict):
+            for key, val in event.data.items():
+                proses_buka_pintu(key, val)
+    # Skenario B: Real-time Update
+    else:
+        key = event.path.replace('/', '')
+        val = event.data
+        proses_buka_pintu(key, val)
+
 # Pasang "Telinga" ke Firebase
 print("[INFO] 🎧 Mendengarkan perintah dari Cloud Dashboard...")
 db_listener = ref_queue.listen(handle_new_registration)
+
+print("[INFO] 🎧 Mendengarkan perintah remote control pintu...")
+db_listener_commands = ref_commands.listen(handle_door_commands)
 
 # MENGAMBIL DATA DARI LOCAL 'users'
 def load_faces_from_local():
@@ -253,8 +291,25 @@ while True:
 cap.release()
 cv2.destroyAllWindows()
 
-db_listener.close()
+
 
 if 'arduino' in locals() and arduino is not None and arduino.is_open:
     arduino.close()
     print("[INFO] Koneksi ke Arduino telah ditutup dengan aman.")
+
+if 'db_listener' in locals() :
+    db_listener.close()
+
+if 'db_listener_command' in locals() :
+    db_listener_commands.close()
+
+# 2. Hapus seluruh sesi Firebase dari memori aplikasi
+import firebase_admin
+try:
+    app = firebase_admin.get_app()
+    firebase_admin.delete_app(app)
+    print("[INFO] 🛑 Koneksi utama Firebase diputus secara total.")
+except Exception as e:
+    pass
+
+print("[SYSTEM] Program dihentikan sepenuhnya. Sampai jumpa!")
