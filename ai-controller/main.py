@@ -36,38 +36,17 @@ ref_commands = db_conn.reference('door_commands') # untuk membuka pintu melalui 
 known_face_encodings = []
 known_face_names = []
 
+pending_registrations = []
+
 # --- FUNGSI BANTUAN UNTUK LISTENER ---
 def proses_data_wajah(key, val):
     if isinstance(val, dict) and 'name' in val and 'image_base64' in val:
+        # Resepsionis HANYA menerima data dan menaruhnya di antrean lokal
         nama_user = val['name']
         base64_str = val['image_base64']
         
-        print(f"\n[CLOUD] ☁️ Menerima pendaftaran wajah baru: {nama_user}")
-        
-        if "," in base64_str:
-            base64_str = base64_str.split(",")[1]
-        
-        path_simpan = os.path.join('users', f"{nama_user}.jpg")
-        try:
-            with open(path_simpan, "wb") as fh:
-                fh.write(base64.b64decode(base64_str))
-            
-            img = face_recognition.load_image_file(path_simpan)
-            encodings = face_recognition.face_encodings(img)
-            if len(encodings) > 0:
-                known_face_encodings.append(encodings[0])
-                known_face_names.append(nama_user)
-                print(f"[SUCCESS] ✅ Wajah {nama_user} siap digunakan!")
-            else:
-                print(f"[WARNING] ⚠️ Wajah tidak terdeteksi pada foto {nama_user}")
-                os.remove(path_simpan)
-                
-            # Hapus antrean berdasarkan Key/ID yang tepat
-            ref_queue.child(key).delete()
-            print("[CLOUD] 🧹 Antrean dibersihkan.")
-            
-        except Exception as e:
-            print(f"[ERROR] Gagal memproses gambar dari cloud: {e}")
+        pending_registrations.append((key, nama_user, base64_str))
+        print(f"\n[CLOUD] 📥 Pesanan wajah baru diterima ({nama_user}). Menunggu diproses...")
 
 # KONFIGURASI ANTRIAN UNTUK MENDAPATKAN DATA SEMENTARA DARI DATABASE YANG LEWAT SEMENTARA SAJA
 # INI NANTI KALAU UDAH JADI BISA DIGANTI
@@ -183,6 +162,39 @@ def get_base64_face(img, y1, x2, y2, x1):
         return ""
     
 while True:
+    # --- CEK ANTREAN WAJAH BARU DI MAIN THREAD ---
+    if len(pending_registrations) > 0:
+        # Ambil satu pesanan dari antrean lokal
+        key, nama_user, base64_str = pending_registrations.pop(0)
+        print(f"[SYSTEM] ⚙️ Memproses dan mempelajari wajah baru: {nama_user}...")
+        
+        if "," in base64_str:
+            base64_str = base64_str.split(",")[1]
+        
+        path_simpan = os.path.join('users', f"{nama_user}.jpg")
+        try:
+            with open(path_simpan, "wb") as fh:
+                fh.write(base64.b64decode(base64_str))
+            
+            # --- PROSES AI SEKARANG AMAN KARENA ADA DI MAIN THREAD ---
+            img_baru = face_recognition.load_image_file(path_simpan)
+            encodings_baru = face_recognition.face_encodings(img_baru)
+            
+            if len(encodings_baru) > 0:
+                known_face_encodings.append(encodings_baru[0])
+                known_face_names.append(nama_user)
+                print(f"[SUCCESS] ✅ Wajah {nama_user} siap digunakan!")
+            else:
+                print(f"[WARNING] ⚠️ Wajah tidak terdeteksi pada foto {nama_user}")
+                os.remove(path_simpan)
+                
+            # --- HAPUS DARI FIREBASE SETELAH SUKSES DIPROSES ---
+            ref_queue.child(key).delete()
+            print("[CLOUD] 🧹 Antrean registrasi di Firebase berhasil dibersihkan.")
+            
+        except Exception as e:
+            print(f"[ERROR] Gagal memproses gambar: {e}")
+    
     success, img = cap.read()
     if not success:
         break
@@ -308,6 +320,8 @@ if 'db_listener' in locals() :
 
 if 'db_listener_commands' in locals() :
     db_listener_commands.close()
+
+time.sleep(1)
 
 # 2. Hapus seluruh sesi Firebase dari memori aplikasi
 import firebase_admin
