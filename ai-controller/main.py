@@ -38,6 +38,8 @@ known_face_names = []
 
 pending_registrations = []
 
+buka_pintu_dari_web = False
+
 # --- FUNGSI BANTUAN UNTUK LISTENER ---
 def proses_data_wajah(key, val):
     if isinstance(val, dict) and 'name' in val and 'image_base64' in val:
@@ -70,6 +72,30 @@ def handle_new_registration(event):
 
 # MENANGANI INFORMASI BARU DARI DATABASE BERUPA OPEN ATAU CLOSE
 def handle_door_commands(event):
+    global buka_pintu_dari_web
+    
+    if event.data is None:
+        return
+
+    def proses_buka_pintu(key, val):
+        global buka_pintu_dari_web
+        if isinstance(val, dict) and val.get('command') == 'OPEN':
+            admin_email = val.get('requestedBy', 'Admin')
+            print(f"\n[CLOUD] 🔓 Perintah BUKA PINTU jarak jauh diterima dari: {admin_email}")
+            
+            # Cukup ubah kertas pesan, JANGAN sentuh arduino di sini!
+            buka_pintu_dari_web = True
+            
+            ref_commands.child(key).delete()
+
+    if event.path == '/':
+        if isinstance(event.data, dict):
+            for key, val in event.data.items():
+                proses_buka_pintu(key, val)
+    else:
+        key = event.path.replace('/', '')
+        val = event.data
+        proses_buka_pintu(key, val)
     if event.data is None:
         return
 
@@ -162,6 +188,29 @@ def get_base64_face(img, y1, x2, y2, x1):
         return ""
     
 while True:
+    # --- 1. EKSEKUSI PERINTAH WEB + AUTO RECONNECT ---
+    if buka_pintu_dari_web:
+        print("[SYSTEM] ⚙️ Mengeksekusi perintah buka pintu dari Web...")
+        if arduino is not None:
+            try:
+                arduino.write(b'O')
+                print("[HARDWARE] Sinyal 'O' dikirim ke motor Servo via Remote.")
+            except Exception as e:
+                print(f"[ERROR HARDWARE] Gagal mengirim sinyal ke Arduino: {e}")
+                print("[SYSTEM] 🔄 Mencoba merestart koneksi USB Arduino...")
+                try:
+                    if arduino.is_open:
+                        arduino.close()
+                    time.sleep(2) # Beri waktu Arduino selesai reboot
+                    arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
+                    print("[SUCCESS] ✅ Koneksi Arduino berhasil dipulihkan!")
+                except Exception as reconnect_error:
+                    print(f"[FATAL] Gagal menyambung ulang Arduino: {reconnect_error}")
+        else:
+            print("[WARNING] Arduino tidak terhubung. Simulasi pintu terbuka.")
+            
+        buka_pintu_dari_web = False # Kembalikan kertas pesan jadi kosong
+
     # --- CEK ANTREAN WAJAH BARU DI MAIN THREAD ---
     if len(pending_registrations) > 0:
         # Ambil satu pesanan dari antrean lokal
@@ -240,10 +289,19 @@ while True:
                             
                             if arduino is not None:
                                 try :
-                                    arduino.write(b'O') # Mengirim huruf 'O' dalam format bytes
+                                    arduino.write(b'O') 
                                     print("[HARDWARE] Sinyal 'O' dikirim ke motor Servo.")
                                 except Exception as e :
                                     print(f"[ERROR HARDWARE] Gagal mengirim sinyal ke Arduino: {e}")
+                                    print("[SYSTEM] 🔄 Mencoba merestart koneksi USB Arduino...")
+                                    try:
+                                        if arduino.is_open:
+                                            arduino.close()
+                                        time.sleep(2)
+                                        arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
+                                        print("[SUCCESS] ✅ Koneksi Arduino berhasil dipulihkan!")
+                                    except Exception as reconnect_error:
+                                        print(f"[FATAL] Gagal menyambung ulang Arduino: {reconnect_error}")
                             
                             # Ambil foto snapshot Base64
                             base64_image = get_base64_face(img, y1, x2, y2, x1)
