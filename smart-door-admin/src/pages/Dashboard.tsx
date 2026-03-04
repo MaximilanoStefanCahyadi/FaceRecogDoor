@@ -3,6 +3,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Activity, Users, DoorOpen } from "lucide-react";
 import { ref, onValue } from "firebase/database";
 import { rtdb } from "@/lib/firebase";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { format, parseISO, startOfDay } from "date-fns";
 
 export default function Dashboard() {
   const [stats, setStats] = useState({
@@ -11,6 +13,7 @@ export default function Dashboard() {
     registeredUsers: 0,
     doorStatus: "Closed",
   });
+  const [chartData, setChartData] = useState<any[]>([]);
 
   useEffect(() => {
     if (!rtdb) return;
@@ -20,16 +23,44 @@ export default function Dashboard() {
     const unsubscribeLogs = onValue(logsRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
-        const logsArray = Object.values(data);
+        const logsArray = Object.values(data) as any[];
         setStats(prev => ({
           ...prev,
           totalLogs: logsArray.length,
-          // Simple check for recent access (assuming timestamp string is sortable/parseable)
-          // For now just counting all as we don't have a reliable date parser for the string format without a library or strict format
           recentAccess: logsArray.length, 
         }));
+
+        // Process data for chart
+        const dailyCounts: { [key: string]: number } = {};
+        logsArray.forEach(log => {
+          if (log.timestamp) {
+            try {
+              // Assuming timestamp is ISO string or similar parsable format
+              // If it's a custom format, we might need more robust parsing
+              const date = parseISO(log.timestamp);
+              const dayKey = format(date, 'yyyy-MM-dd');
+              dailyCounts[dayKey] = (dailyCounts[dayKey] || 0) + 1;
+            } catch (e) {
+              console.warn("Failed to parse log timestamp:", log.timestamp);
+            }
+          }
+        });
+
+        // Convert to array and sort by date
+        const chartDataArray = Object.entries(dailyCounts)
+          .map(([date, count]) => ({
+            date,
+            displayDate: format(parseISO(date), 'MMM dd'),
+            count
+          }))
+          .sort((a, b) => a.date.localeCompare(b.date))
+          .slice(-7); // Last 7 days
+
+        setChartData(chartDataArray);
+
       } else {
         setStats(prev => ({ ...prev, totalLogs: 0, recentAccess: 0 }));
+        setChartData([]);
       }
     });
 
@@ -110,11 +141,38 @@ export default function Dashboard() {
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
         <Card className="col-span-4">
           <CardHeader>
-            <CardTitle>Recent Activity</CardTitle>
+            <CardTitle>Access Activity (Last 7 Days)</CardTitle>
           </CardHeader>
           <CardContent>
-             <div className="flex items-center justify-center h-40 text-zinc-400">
-                Chart placeholder (Recharts can be added here)
+             <div className="h-[300px] w-full">
+               {chartData.length > 0 ? (
+                 <ResponsiveContainer width="100%" height="100%">
+                   <BarChart data={chartData}>
+                     <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                     <XAxis 
+                       dataKey="displayDate" 
+                       tickLine={false}
+                       axisLine={false}
+                       tick={{ fontSize: 12, fill: '#71717a' }}
+                     />
+                     <YAxis 
+                       tickLine={false}
+                       axisLine={false}
+                       tick={{ fontSize: 12, fill: '#71717a' }}
+                       allowDecimals={false}
+                     />
+                     <Tooltip 
+                       cursor={{ fill: '#f4f4f5' }}
+                       contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                     />
+                     <Bar dataKey="count" fill="#4f46e5" radius={[4, 4, 0, 0]} barSize={40} />
+                   </BarChart>
+                 </ResponsiveContainer>
+               ) : (
+                 <div className="flex h-full items-center justify-center text-zinc-400">
+                   No data available for chart
+                 </div>
+               )}
              </div>
           </CardContent>
         </Card>
