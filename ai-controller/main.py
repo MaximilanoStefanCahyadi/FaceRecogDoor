@@ -53,7 +53,7 @@ def proses_data_wajah(key, val):
 
 # KONFIGURASI ANTRIAN UNTUK MENDAPATKAN DATA SEMENTARA DARI DATABASE YANG LEWAT SEMENTARA SAJA
 # INI NANTI KALAU UDAH JADI BISA DIGANTI
-# AKAN LANGSUNG MENGHAPUS DATA DARI DATABASE 'users'
+# AKAN LANGSUNG MENGHAPUS DATA DARI DATABASE 'registered_faces'
 def handle_new_registration(event):
     if event.data is None:
         return
@@ -102,16 +102,16 @@ def handle_door_commands(event):
         val = event.data
         proses_buka_pintu(key, val)
 
-# MENGAMBIL DATA DARI LOCAL 'users'
+# MENGAMBIL DATA DARI LOCAL 'registered_faces'
 def load_faces_from_local():
-    print("[INFO] Membaca data wajah dari folder lokal 'users/'...")
-    if not os.path.exists('users'):
-        os.makedirs('users')
+    print("[INFO] Membaca data wajah dari folder lokal 'registered_faces/'...")
+    if not os.path.exists('registered_faces'):
+        os.makedirs('registered_faces')
         return
         
-    for filename in os.listdir('users'):
+    for filename in os.listdir('registered_faces'):
         if filename.endswith('.jpg') or filename.endswith('.png'):
-            path_to_file = os.path.join('users', filename)
+            path_to_file = os.path.join('registered_faces', filename)
             img = face_recognition.load_image_file(path_to_file)
             encodings = face_recognition.face_encodings(img)
             if len(encodings) > 0:
@@ -185,7 +185,7 @@ while True:
         if "," in base64_str:
             base64_str = base64_str.split(",")[1]
         
-        path_simpan = os.path.join('users', f"{nama_user}.jpg")
+        path_simpan = os.path.join('registered_faces', f"{nama_user}.jpg")
         try:
             with open(path_simpan, "wb") as fh:
                 fh.write(base64.b64decode(base64_str))
