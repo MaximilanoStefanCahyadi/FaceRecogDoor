@@ -91,7 +91,7 @@ export default function Dashboard() {
     });
 
     // 4. Listen to Users
-    const usersRef = ref(rtdb, "users");
+    const usersRef = ref(rtdb, "registered_face");
     const unsubUsers = onValue(usersRef, (snapshot) => {
       setStats(prev => ({ ...prev, registeredUsers: snapshot.val() ? Object.keys(snapshot.val()).length : 0 }));
     });

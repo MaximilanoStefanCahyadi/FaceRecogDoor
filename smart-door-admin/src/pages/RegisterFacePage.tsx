@@ -73,7 +73,7 @@ export default function RegisterFacePage() {
         });
 
         // 2. Masukkan ke Daftar User (Untuk tabel Dashboard web Anda)
-        const usersRef = dbRef(rtdb, "users");
+        const usersRef = dbRef(rtdb, "registered_face");
         const newUserRef = push(usersRef);
         await set(newUserRef, {
           name: safeName,
