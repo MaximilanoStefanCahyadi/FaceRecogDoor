@@ -105,7 +105,15 @@ export default function LogsPage() {
                     <TableCell className="font-medium">
                       {log.timestamp || "N/A"}
                     </TableCell>
-                    <TableCell>{log.name || "Unknown"}</TableCell>
+                    <TableCell>
+                      {(!log.name || log.name.toLowerCase() === "unknown") ? (
+                        <span className="inline-flex items-center rounded-md bg-red-100 px-2 py-1 text-xs font-bold text-red-700 ring-1 ring-inset ring-red-600/20">
+                          UNKNOWN
+                        </span>
+                      ) : (
+                        <span className="font-medium text-zinc-900">{log.name}</span>
+                      )}
+                    </TableCell>
                     <TableCell>{log.method || "Face ID"}</TableCell>
                     <TableCell>
                       <span
