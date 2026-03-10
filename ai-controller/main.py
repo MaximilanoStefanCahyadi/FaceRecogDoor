@@ -188,6 +188,165 @@ def get_base64_face(img, y1, x2, y2, x1):
         return ""
     
 while True:
+    # ==========================================
+    # 1. SIAPKAN "BENDERA" STATUS UNTUK SAAT INI
+    # ==========================================
+    buka_pintu_dari_web
+    perintah_buka_sekarang = False
+    metode_akses = ""
+    nama_akses = ""
+    koordinat_wajah = None # Untuk menyimpan letak kotak wajah jika ada
+
+    success, img = cap.read()
+    if not success:
+        break
+
+    # ==========================================
+    # 2. CEK KONDISI A: APAKAH ADA PERINTAH DARI WEB?
+    # ==========================================
+    if buka_pintu_dari_web:
+        perintah_buka_sekarang = True
+        metode_akses = "Remote Web Override"
+        nama_akses = "Admin"
+        buka_pintu_dari_web = False # Kembalikan kertas pesan jadi kosong
+
+
+    # ==========================================
+    # 3. CEK KONDISI B: APAKAH ADA WAJAH DI KAMERA?
+    # ==========================================
+    small_frame = cv2.resize(img, (0,0), fx=0.25, fy=0.25)
+    rgb_img_strict = np.ascontiguousarray(cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)[:, :, :3], dtype=np.uint8)
+
+    facesCurFrame = face_recognition.face_locations(rgb_img_strict)
+    encodesCurFrame = face_recognition.face_encodings(rgb_img_strict, facesCurFrame)
+    names_in_current_frame = []
+
+    for encodeFace, faceLoc in zip(encodesCurFrame, facesCurFrame):
+        matches = face_recognition.compare_faces(known_face_encodings, encodeFace, tolerance=TOLERANCE)
+        faceDis = face_recognition.face_distance(known_face_encodings, encodeFace)
+        y1, x2, y2, x1 = [val * 4 for val in faceLoc] # Dikali 4 karena gambar tadi diperkecil
+
+        if len(faceDis) > 0:
+            matchIndex = np.argmin(faceDis)
+            
+            # --- JIKA WAJAH DIKENALI ---
+            if matches[matchIndex]:
+                name = known_face_names[matchIndex]
+                names_in_current_frame.append(name)
+                
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(img, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                if name not in face_timers:
+                    face_timers[name] = time.time()
+                else:
+                    elapsed_time = time.time() - face_timers[name]
+                    cv2.putText(img, f"Auth: {elapsed_time:.1f}s / {HOLD_TIME}s", (x1, y2 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    
+                    # Jika wajah sudah menatap cukup lama DAN sistem tidak sedang cooldown
+                    if elapsed_time >= HOLD_TIME and not cooldown:
+                        # ANGKAT BENDERA!
+                        perintah_buka_sekarang = True
+                        metode_akses = "Face ID"
+                        nama_akses = name
+                        koordinat_wajah = (y1, x2, y2, x1) # Simpan koordinat untuk dicrop nanti
+            
+            # --- JIKA PENYUSUP (UNKNOWN) ---
+            else:
+                # ... (Biarkan logika UNKNOWN Anda persis seperti sebelumnya) ...
+                name = "UNKNOWN"
+                names_in_current_frame.append(name)
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                cv2.putText(img, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                
+                if name not in face_timers:
+                    face_timers[name] = time.time()
+                else:
+                    elapsed_time = time.time() - face_timers[name]
+                    if elapsed_time >= 3.0 and not cooldown:
+                        print(f"\n[WARNING] Penyusup terdeteksi!")
+                        base64_image = get_base64_face(img, y1, x2, y2, x1)
+                        try:
+                            ref_logs.push({'name': 'UNKNOWN', 'timestamp': str(datetime.now().strftime("%Y-%m-%d %H:%M:%S")), 'method': 'Intruder Alert', 'snapshot': base64_image})
+                        except: pass
+                        cooldown = True
+                        cooldown_time = time.time()
+                        face_timers.pop(name)
+
+    names_to_remove = [n for n in face_timers.keys() if n not in names_in_current_frame]
+    for n in names_to_remove:
+        face_timers.pop(n)
+
+# ==========================================
+    # 4. EKSEKUSI TUNGGAL (Semua Kasus Berujung ke Sini!)
+    # ==========================================
+    if perintah_buka_sekarang and not cooldown:
+        print(f"\n[ACTION] Memproses akses untuk: {nama_akses} (Via: {metode_akses})")
+        
+        # --- TAMBAHAN BARU: Variabel Penentu Kesuksesan ---
+        hardware_berhasil = False 
+
+        # A. Jalankan Hardware Dulu
+        if arduino is not None:
+            try:
+                arduino.write(b'O')
+                print("[HARDWARE] Sinyal 'O' berhasil dikirim ke Servo.")
+                # Kertas Lulus Uji dicentang karena tidak ada error!
+                hardware_berhasil = True 
+            except Exception as e:
+                print(f"[ERROR] Kabel Arduino Bermasalah: {e}. Auto-Reconnect...")
+                # hardware_berhasil tetap False, jadi gagal.
+                try:
+                    if arduino.is_open: arduino.close()
+                    time.sleep(2)
+                    arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
+                except: pass
+        else:
+            print("[WARNING] Arduino tidak terhubung. Simulasi pintu terbuka.")
+            hardware_berhasil = True # Anggap berhasil jika sedang mode testing tanpa Arduino
+
+        # B & C. Lanjut ke Database HANYA JIKA Hardware Berhasil
+        if hardware_berhasil:
+            # Ambil Foto Bukti
+            if koordinat_wajah is not None:
+                y1, x2, y2, x1 = koordinat_wajah
+                base64_image = get_base64_face(img, y1, x2, y2, x1)
+            else:
+                img_kecil = cv2.resize(img, (200, 150))
+                _, buffer = cv2.imencode('.jpg', img_kecil)
+                base64_image = f"data:image/jpeg;base64,{base64.b64encode(buffer).decode('utf-8')}"
+
+            # Catat ke Database
+            try:
+                ref_logs.push({
+                    'name': nama_akses,
+                    'timestamp': str(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                    'method': metode_akses,
+                    'snapshot': base64_image
+                })
+                print("[SUCCESS] Pintu Terbuka! Log Aktivitas tercatat di Cloud.")
+            except Exception as e:
+                print(f"[ERROR] Gagal mengirim log ke Cloud: {e}")
+        else:
+            # Jika hardware error, batalkan pengiriman ke database
+            print("[FAILED] Pintu gagal dibuka secara fisik. Akses batal dicatat ke Cloud.")
+
+        # D. Aktifkan Cooldown Global (Agar sistem tidak spam mencoba terus-menerus)
+        cooldown = True
+        cooldown_time = time.time()
+        if nama_akses in face_timers:
+            face_timers.pop(nama_akses)
+
+    # ==========================================
+    # 5. MANAJEMEN COOLDOWN & RENDER LAYAR
+    # ==========================================
+    if cooldown and (time.time() - cooldown_time > 10):
+        cooldown = False
+        print("[SYSTEM] Siap memindai lagi.")
+
+    cv2.imshow('Smart Door Lock', img)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
     # --- 1. EKSEKUSI PERINTAH WEB + AUTO RECONNECT ---
     if buka_pintu_dari_web:
         print("[SYSTEM] ⚙️ Mengeksekusi perintah buka pintu dari Web...")
