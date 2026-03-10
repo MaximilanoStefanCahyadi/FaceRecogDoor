@@ -32,6 +32,7 @@ db_conn = initialize_firebase()
 ref_logs = db_conn.reference('logs') # untuk logs
 ref_queue = db_conn.reference('registration_queue') # untuk mendapat wajah baru
 ref_commands = db_conn.reference('door_commands') # untuk membuka pintu melalui web
+ref_health = db_conn.reference('system_health') # untuk mengecek system health
 
 known_face_encodings = []
 known_face_names = []
@@ -71,6 +72,11 @@ def handle_new_registration(event):
 
 
 # MENANGANI INFORMASI BARU DARI DATABASE BERUPA OPEN ATAU CLOSE
+# ==========================================
+# GANTIKAN MULAI DARI SINI KE BAWAH!
+# ==========================================
+
+# MENANGANI INFORMASI BARU DARI DATABASE BERUPA OPEN ATAU CLOSE
 def handle_door_commands(event):
     global buka_pintu_dari_web
     
@@ -85,44 +91,12 @@ def handle_door_commands(event):
             
             # Cukup ubah kertas pesan, JANGAN sentuh arduino di sini!
             buka_pintu_dari_web = True
-            
             ref_commands.child(key).delete()
 
     if event.path == '/':
         if isinstance(event.data, dict):
             for key, val in event.data.items():
                 proses_buka_pintu(key, val)
-    else:
-        key = event.path.replace('/', '')
-        val = event.data
-        proses_buka_pintu(key, val)
-    if event.data is None:
-        return
-
-    def proses_buka_pintu(key, val):
-        if isinstance(val, dict) and val.get('command') == 'OPEN':
-            admin_email = val.get('requestedBy', 'Admin')
-            print(f"\n[CLOUD] 🔓 Perintah BUKA PINTU jarak jauh diterima dari: {admin_email}")
-            
-            # Kirim sinyal ke hardware
-            if arduino is not None:
-                try:
-                    arduino.write(b'O')
-                    print("[HARDWARE] Sinyal 'O' dikirim ke motor Servo via Remote.")
-                except Exception as e:
-                    print(f"[ERROR HARDWARE] Gagal mengirim sinyal ke Arduino: {e}")
-            else:
-                print("[WARNING] Arduino tidak terhubung. Simulasi pintu terbuka.")
-            
-            # Hapus perintah dari database agar tidak dieksekusi ulang
-            ref_commands.child(key).delete()
-
-    # Skenario A: Initial Load
-    if event.path == '/':
-        if isinstance(event.data, dict):
-            for key, val in event.data.items():
-                proses_buka_pintu(key, val)
-    # Skenario B: Real-time Update
     else:
         key = event.path.replace('/', '')
         val = event.data
@@ -131,6 +105,10 @@ def handle_door_commands(event):
 # MENGAMBIL DATA DARI LOCAL 'users'
 def load_faces_from_local():
     print("[INFO] Membaca data wajah dari folder lokal 'users/'...")
+    if not os.path.exists('users'):
+        os.makedirs('users')
+        return
+        
     for filename in os.listdir('users'):
         if filename.endswith('.jpg') or filename.endswith('.png'):
             path_to_file = os.path.join('users', filename)
@@ -154,34 +132,28 @@ db_listener = ref_queue.listen(handle_new_registration)
 print("[INFO] 🎧 Mendengarkan perintah remote control pintu...")
 db_listener_commands = ref_commands.listen(handle_door_commands)
 
+# --- VARIABEL TIMER & COOLDOWN ---
 cooldown = False
 cooldown_time = 0
 face_timers = {} 
 
-# --- FUNGSI BARU: Konversi Wajah ke Base64 ---
+# --- TAMBAHAN BARU: Variabel untuk System Health (Detak Jantung) ---
+last_health_ping = 0
+HEALTH_PING_INTERVAL = 5 # Kirim status setiap 5 detik
+# ------------------------------------------------------------------
+
+# --- FUNGSI Konversi Wajah ke Base64 ---
 def get_base64_face(img, y1, x2, y2, x1):
     try:
-        # 1. Crop (potong) gambar hanya di area wajah
-        # Tambahkan sedikit padding (margin) agar tidak terlalu nge-zoom
         pad = 20
         h, w, _ = img.shape
-        y1_p = max(0, y1 - pad)
-        y2_p = min(h, y2 + pad)
-        x1_p = max(0, x1 - pad)
-        x2_p = min(w, x2 + pad)
+        y1_p, y2_p = max(0, y1 - pad), min(h, y2 + pad)
+        x1_p, x2_p = max(0, x1 - pad), min(w, x2 + pad)
         
         cropped_face = img[y1_p:y2_p, x1_p:x2_p]
-        
-        # 2. Perkecil ukuran gambar menjadi 100x100 pixel agar teks Base64 tidak terlalu panjang
         resized_face = cv2.resize(cropped_face, (100, 100))
-        
-        # 3. Ubah gambar OpenCV ke format memori JPG
         _, buffer = cv2.imencode('.jpg', resized_face)
-        
-        # 4. Ubah ke Base64 string
         base64_str = base64.b64encode(buffer).decode('utf-8')
-        
-        # Tambahkan prefix agar bisa langsung dibaca oleh tag <img> di Web HTML/React
         return f"data:image/jpeg;base64,{base64_str}"
     except Exception as e:
         print(f"[WARNING] Gagal crop wajah: {e}")
@@ -189,30 +161,74 @@ def get_base64_face(img, y1, x2, y2, x1):
     
 while True:
     # ==========================================
-    # 1. SIAPKAN "BENDERA" STATUS UNTUK SAAT INI
+    # 0. KIRIM DETAK JANTUNG KE FIREBASE (SYSTEM HEALTH)
     # ==========================================
-    buka_pintu_dari_web
+    current_time = time.time()
+    if current_time - last_health_ping > HEALTH_PING_INTERVAL:
+        try:
+            ref_health.set({
+                'last_seen': int(current_time * 1000), # Format milidetik untuk Web React
+                'camera_active': cap.isOpened(),
+                'arduino_active': arduino is not None and arduino.is_open
+            })
+            last_health_ping = current_time
+        except:
+            pass # Abaikan jika kebetulan internet putus sekian detik
+
+    # ==========================================
+    # 1. CEK ANTREAN WAJAH BARU (Dari Resepsionis)
+    # ==========================================
+    if len(pending_registrations) > 0:
+        key, nama_user, base64_str = pending_registrations.pop(0)
+        print(f"[SYSTEM] ⚙️ Memproses dan mempelajari wajah baru: {nama_user}...")
+        
+        if "," in base64_str:
+            base64_str = base64_str.split(",")[1]
+        
+        path_simpan = os.path.join('users', f"{nama_user}.jpg")
+        try:
+            with open(path_simpan, "wb") as fh:
+                fh.write(base64.b64decode(base64_str))
+            
+            img_baru = face_recognition.load_image_file(path_simpan)
+            encodings_baru = face_recognition.face_encodings(img_baru)
+            
+            if len(encodings_baru) > 0:
+                known_face_encodings.append(encodings_baru[0])
+                known_face_names.append(nama_user)
+                print(f"[SUCCESS] ✅ Wajah {nama_user} siap digunakan!")
+            else:
+                print(f"[WARNING] ⚠️ Wajah tidak terdeteksi pada foto {nama_user}")
+                os.remove(path_simpan)
+                
+            ref_queue.child(key).delete()
+            print("[CLOUD] 🧹 Antrean registrasi di Firebase berhasil dibersihkan.")
+        except Exception as e:
+            print(f"[ERROR] Gagal memproses gambar: {e}")
+
+    # ==========================================
+    # 2. SIAPKAN "BENDERA" STATUS UNTUK SAAT INI
+    # ==========================================
     perintah_buka_sekarang = False
     metode_akses = ""
     nama_akses = ""
-    koordinat_wajah = None # Untuk menyimpan letak kotak wajah jika ada
+    koordinat_wajah = None 
 
     success, img = cap.read()
     if not success:
         break
 
     # ==========================================
-    # 2. CEK KONDISI A: APAKAH ADA PERINTAH DARI WEB?
+    # 3. KONDISI A: APAKAH ADA PERINTAH DARI WEB?
     # ==========================================
     if buka_pintu_dari_web:
         perintah_buka_sekarang = True
         metode_akses = "Remote Web Override"
         nama_akses = "Admin"
-        buka_pintu_dari_web = False # Kembalikan kertas pesan jadi kosong
-
+        buka_pintu_dari_web = False 
 
     # ==========================================
-    # 3. CEK KONDISI B: APAKAH ADA WAJAH DI KAMERA?
+    # 4. KONDISI B: APAKAH ADA WAJAH DI KAMERA?
     # ==========================================
     small_frame = cv2.resize(img, (0,0), fx=0.25, fy=0.25)
     rgb_img_strict = np.ascontiguousarray(cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)[:, :, :3], dtype=np.uint8)
@@ -224,7 +240,7 @@ while True:
     for encodeFace, faceLoc in zip(encodesCurFrame, facesCurFrame):
         matches = face_recognition.compare_faces(known_face_encodings, encodeFace, tolerance=TOLERANCE)
         faceDis = face_recognition.face_distance(known_face_encodings, encodeFace)
-        y1, x2, y2, x1 = [val * 4 for val in faceLoc] # Dikali 4 karena gambar tadi diperkecil
+        y1, x2, y2, x1 = [val * 4 for val in faceLoc]
 
         if len(faceDis) > 0:
             matchIndex = np.argmin(faceDis)
@@ -243,17 +259,14 @@ while True:
                     elapsed_time = time.time() - face_timers[name]
                     cv2.putText(img, f"Auth: {elapsed_time:.1f}s / {HOLD_TIME}s", (x1, y2 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     
-                    # Jika wajah sudah menatap cukup lama DAN sistem tidak sedang cooldown
                     if elapsed_time >= HOLD_TIME and not cooldown:
-                        # ANGKAT BENDERA!
                         perintah_buka_sekarang = True
                         metode_akses = "Face ID"
                         nama_akses = name
-                        koordinat_wajah = (y1, x2, y2, x1) # Simpan koordinat untuk dicrop nanti
+                        koordinat_wajah = (y1, x2, y2, x1) 
             
             # --- JIKA PENYUSUP (UNKNOWN) ---
             else:
-                # ... (Biarkan logika UNKNOWN Anda persis seperti sebelumnya) ...
                 name = "UNKNOWN"
                 names_in_current_frame.append(name)
                 cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
@@ -277,13 +290,11 @@ while True:
     for n in names_to_remove:
         face_timers.pop(n)
 
-# ==========================================
-    # 4. EKSEKUSI TUNGGAL (Semua Kasus Berujung ke Sini!)
+    # ==========================================
+    # 5. EKSEKUSI TUNGGAL & VALIDASI TRANSAKSI
     # ==========================================
     if perintah_buka_sekarang and not cooldown:
         print(f"\n[ACTION] Memproses akses untuk: {nama_akses} (Via: {metode_akses})")
-        
-        # --- TAMBAHAN BARU: Variabel Penentu Kesuksesan ---
         hardware_berhasil = False 
 
         # A. Jalankan Hardware Dulu
@@ -291,11 +302,9 @@ while True:
             try:
                 arduino.write(b'O')
                 print("[HARDWARE] Sinyal 'O' berhasil dikirim ke Servo.")
-                # Kertas Lulus Uji dicentang karena tidak ada error!
                 hardware_berhasil = True 
             except Exception as e:
                 print(f"[ERROR] Kabel Arduino Bermasalah: {e}. Auto-Reconnect...")
-                # hardware_berhasil tetap False, jadi gagal.
                 try:
                     if arduino.is_open: arduino.close()
                     time.sleep(2)
@@ -303,11 +312,10 @@ while True:
                 except: pass
         else:
             print("[WARNING] Arduino tidak terhubung. Simulasi pintu terbuka.")
-            hardware_berhasil = True # Anggap berhasil jika sedang mode testing tanpa Arduino
+            hardware_berhasil = True
 
         # B & C. Lanjut ke Database HANYA JIKA Hardware Berhasil
         if hardware_berhasil:
-            # Ambil Foto Bukti
             if koordinat_wajah is not None:
                 y1, x2, y2, x1 = koordinat_wajah
                 base64_image = get_base64_face(img, y1, x2, y2, x1)
@@ -316,7 +324,6 @@ while True:
                 _, buffer = cv2.imencode('.jpg', img_kecil)
                 base64_image = f"data:image/jpeg;base64,{base64.b64encode(buffer).decode('utf-8')}"
 
-            # Catat ke Database
             try:
                 ref_logs.push({
                     'name': nama_akses,
@@ -328,17 +335,15 @@ while True:
             except Exception as e:
                 print(f"[ERROR] Gagal mengirim log ke Cloud: {e}")
         else:
-            # Jika hardware error, batalkan pengiriman ke database
             print("[FAILED] Pintu gagal dibuka secara fisik. Akses batal dicatat ke Cloud.")
 
-        # D. Aktifkan Cooldown Global (Agar sistem tidak spam mencoba terus-menerus)
         cooldown = True
         cooldown_time = time.time()
         if nama_akses in face_timers:
             face_timers.pop(nama_akses)
 
     # ==========================================
-    # 5. MANAJEMEN COOLDOWN & RENDER LAYAR
+    # 6. MANAJEMEN COOLDOWN & RENDER LAYAR
     # ==========================================
     if cooldown and (time.time() - cooldown_time > 10):
         cooldown = False
@@ -347,186 +352,12 @@ while True:
     cv2.imshow('Smart Door Lock', img)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
-    # --- 1. EKSEKUSI PERINTAH WEB + AUTO RECONNECT ---
-    if buka_pintu_dari_web:
-        print("[SYSTEM] ⚙️ Mengeksekusi perintah buka pintu dari Web...")
-        if arduino is not None:
-            try:
-                arduino.write(b'O')
-                print("[HARDWARE] Sinyal 'O' dikirim ke motor Servo via Remote.")
-            except Exception as e:
-                print(f"[ERROR HARDWARE] Gagal mengirim sinyal ke Arduino: {e}")
-                print("[SYSTEM] 🔄 Mencoba merestart koneksi USB Arduino...")
-                try:
-                    if arduino.is_open:
-                        arduino.close()
-                    time.sleep(2) # Beri waktu Arduino selesai reboot
-                    arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
-                    print("[SUCCESS] ✅ Koneksi Arduino berhasil dipulihkan!")
-                except Exception as reconnect_error:
-                    print(f"[FATAL] Gagal menyambung ulang Arduino: {reconnect_error}")
-        else:
-            print("[WARNING] Arduino tidak terhubung. Simulasi pintu terbuka.")
-            
-        buka_pintu_dari_web = False # Kembalikan kertas pesan jadi kosong
 
-    # --- CEK ANTREAN WAJAH BARU DI MAIN THREAD ---
-    if len(pending_registrations) > 0:
-        # Ambil satu pesanan dari antrean lokal
-        key, nama_user, base64_str = pending_registrations.pop(0)
-        print(f"[SYSTEM] ⚙️ Memproses dan mempelajari wajah baru: {nama_user}...")
-        
-        if "," in base64_str:
-            base64_str = base64_str.split(",")[1]
-        
-        path_simpan = os.path.join('users', f"{nama_user}.jpg")
-        try:
-            with open(path_simpan, "wb") as fh:
-                fh.write(base64.b64decode(base64_str))
-            
-            # --- PROSES AI SEKARANG AMAN KARENA ADA DI MAIN THREAD ---
-            img_baru = face_recognition.load_image_file(path_simpan)
-            encodings_baru = face_recognition.face_encodings(img_baru)
-            
-            if len(encodings_baru) > 0:
-                known_face_encodings.append(encodings_baru[0])
-                known_face_names.append(nama_user)
-                print(f"[SUCCESS] ✅ Wajah {nama_user} siap digunakan!")
-            else:
-                print(f"[WARNING] ⚠️ Wajah tidak terdeteksi pada foto {nama_user}")
-                os.remove(path_simpan)
-                
-            # --- HAPUS DARI FIREBASE SETELAH SUKSES DIPROSES ---
-            ref_queue.child(key).delete()
-            print("[CLOUD] 🧹 Antrean registrasi di Firebase berhasil dibersihkan.")
-            
-        except Exception as e:
-            print(f"[ERROR] Gagal memproses gambar: {e}")
-    
-    success, img = cap.read()
-    if not success:
-        break
-    
-    # Mengkompres ukuran kamera supaya tidak berat
-    small_frame = cv2.resize(img, (0,0), fx = 0.25, fy=0.25)
-
-    rgb_img = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-    rgb_img_strict = np.ascontiguousarray(rgb_img[:, :, :3], dtype=np.uint8)
-
-    facesCurFrame = face_recognition.face_locations(rgb_img_strict)
-    encodesCurFrame = face_recognition.face_encodings(rgb_img_strict, facesCurFrame)
-    names_in_current_frame = []
-
-    for encodeFace, faceLoc in zip(encodesCurFrame, facesCurFrame):
-        matches = face_recognition.compare_faces(known_face_encodings, encodeFace, tolerance=TOLERANCE)
-        faceDis = face_recognition.face_distance(known_face_encodings, encodeFace)
-        y1, x2, y2, x1 = faceLoc
-
-        # Karena ukuran kamera dikurangi 1/4 maka koordinat harus dikali 4
-        y1, x2, y2, x1 = y1 * 4, x2 * 4, y2 * 4, x1 * 4
-
-        if len(faceDis) > 0:
-            matchIndex = np.argmin(faceDis)
-            
-            # --- JIKA WAJAH DIKENALI ---
-            if matches[matchIndex]:
-                name = known_face_names[matchIndex]
-                names_in_current_frame.append(name)
-                
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(img, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                
-                if name not in face_timers:
-                    face_timers[name] = time.time()
-                else:
-                    elapsed_time = time.time() - face_timers[name]
-                    cv2.putText(img, f"Auth: {elapsed_time:.1f}s / {HOLD_TIME}s", (x1, y2 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                    
-                    if elapsed_time >= HOLD_TIME:
-                        if not cooldown:
-                            print(f"\n[ACTION] Membuka pintu untuk: {name}")
-                            
-                            if arduino is not None:
-                                try :
-                                    arduino.write(b'O') 
-                                    print("[HARDWARE] Sinyal 'O' dikirim ke motor Servo.")
-                                except Exception as e :
-                                    print(f"[ERROR HARDWARE] Gagal mengirim sinyal ke Arduino: {e}")
-                                    print("[SYSTEM] 🔄 Mencoba merestart koneksi USB Arduino...")
-                                    try:
-                                        if arduino.is_open:
-                                            arduino.close()
-                                        time.sleep(2)
-                                        arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
-                                        print("[SUCCESS] ✅ Koneksi Arduino berhasil dipulihkan!")
-                                    except Exception as reconnect_error:
-                                        print(f"[FATAL] Gagal menyambung ulang Arduino: {reconnect_error}")
-                            
-                            # Ambil foto snapshot Base64
-                            base64_image = get_base64_face(img, y1, x2, y2, x1)
-                            
-                            try:
-                                ref_logs.push({
-                                    'name': name,
-                                    'timestamp': str(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-                                    'method': 'Face ID',
-                                    'snapshot': base64_image # <-- Gambar disisipkan ke database
-                                })
-                                print("[SUCCESS] Data & Foto berhasil dicatat ke Firebase!")
-                            except Exception as e:
-                                print(f"[ERROR] Gagal mengirim ke Firebase: {e}")
-                                
-                            cooldown = True
-                            cooldown_time = time.time()
-                            face_timers.pop(name) 
-                            
-            # --- JIKA WAJAH TIDAK DIKENAL (UNKNOWN) ---
-            else:
-                name = "UNKNOWN"
-                names_in_current_frame.append(name)
-                
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                cv2.putText(img, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                
-                # Kita juga bisa mencatat wajah orang asing jika dia berdiri lebih dari 3 detik
-                if name not in face_timers:
-                    face_timers[name] = time.time()
-                else:
-                    elapsed_time = time.time() - face_timers[name]
-                    if elapsed_time >= 3.0: # 3 Detik untuk orang asing
-                        if not cooldown:
-                            print(f"\n[WARNING] Penyusup terdeteksi!")
-                            base64_image = get_base64_face(img, y1, x2, y2, x1)
-                            try:
-                                ref_logs.push({
-                                    'name': 'UNKNOWN',
-                                    'timestamp': str(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-                                    'method': 'Intruder Alert',
-                                    'snapshot': base64_image
-                                })
-                                print("[SUCCESS] Foto penyusup dicatat ke Firebase!")
-                            except Exception as e:
-                                print(f"[ERROR] {e}")
-                            cooldown = True
-                            cooldown_time = time.time()
-                            face_timers.pop(name)
-
-    names_to_remove = [n for n in face_timers.keys() if n not in names_in_current_frame]
-    for n in names_to_remove:
-        face_timers.pop(n)
-
-    if cooldown and (time.time() - cooldown_time > 10):
-        cooldown = False
-        print("[SYSTEM] Siap memindai lagi.")
-
-    cv2.imshow('Smart Door Lock', img)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
+# ==========================================
+# 7. BLOK CLEANUP (BERSIH-BERSIH)
+# ==========================================
 cap.release()
 cv2.destroyAllWindows()
-
-
 
 if 'arduino' in locals() and arduino is not None and arduino.is_open:
     arduino.close()
@@ -537,16 +368,5 @@ if 'db_listener' in locals() :
 
 if 'db_listener_commands' in locals() :
     db_listener_commands.close()
-
-time.sleep(1)
-
-# 2. Hapus seluruh sesi Firebase dari memori aplikasi
-import firebase_admin
-try:
-    app = firebase_admin.get_app()
-    firebase_admin.delete_app(app)
-    print("[INFO] 🛑 Koneksi utama Firebase diputus secara total.")
-except Exception as e:
-    pass
 
 print("[SYSTEM] Program dihentikan sepenuhnya. Sampai jumpa!")
